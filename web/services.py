@@ -19,7 +19,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Union
 
-from enums import ReportType
+from src.enums import ReportType
+from src.storage import get_db
+from bot.models import BotMessage
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +173,9 @@ class AnalysisService:
     def submit_analysis(
         self, 
         code: str, 
-        report_type: Union[ReportType, str] = ReportType.SIMPLE
+        report_type: Union[ReportType, str] = ReportType.SIMPLE,
+        source_message: Optional[BotMessage] = None,
+        save_context_snapshot: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         提交异步分析任务
@@ -190,7 +194,14 @@ class AnalysisService:
         task_id = f"{code}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
         
         # 提交到线程池
-        self.executor.submit(self._run_analysis, code, task_id, report_type)
+        self.executor.submit(
+            self._run_analysis,
+            code,
+            task_id,
+            report_type,
+            source_message,
+            save_context_snapshot
+        )
         
         logger.info(f"[AnalysisService] 已提交股票 {code} 的分析任务, task_id={task_id}, report_type={report_type.value}")
         
@@ -214,12 +225,28 @@ class AnalysisService:
         # 按开始时间倒序
         tasks.sort(key=lambda x: x.get('start_time', ''), reverse=True)
         return tasks[:limit]
+
+    def get_analysis_history(
+        self,
+        code: Optional[str] = None,
+        query_id: Optional[str] = None,
+        days: int = 30,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        获取分析历史记录
+        """
+        db = get_db()
+        records = db.get_analysis_history(code=code, query_id=query_id, days=days, limit=limit)
+        return [r.to_dict() for r in records]
     
     def _run_analysis(
         self, 
         code: str, 
         task_id: str, 
-        report_type: ReportType = ReportType.SIMPLE
+        report_type: ReportType = ReportType.SIMPLE,
+        source_message: Optional[BotMessage] = None,
+        save_context_snapshot: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         执行单只股票分析
@@ -245,14 +272,21 @@ class AnalysisService:
         
         try:
             # 延迟导入避免循环依赖
-            from config import get_config
+            from src.config import get_config
             from main import StockAnalysisPipeline
             
             logger.info(f"[AnalysisService] 开始分析股票: {code}")
             
             # 创建分析管道
             config = get_config()
-            pipeline = StockAnalysisPipeline(config=config, max_workers=1)
+            pipeline = StockAnalysisPipeline(
+                config=config,
+                max_workers=1,
+                source_message=source_message,
+                query_id=task_id,
+                query_source="web",
+                save_context_snapshot=save_context_snapshot
+            )
             
             # 执行单只股票分析（启用单股推送）
             result = pipeline.process_single_stock(
